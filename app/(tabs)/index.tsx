@@ -1,98 +1,220 @@
-import { Image } from 'expo-image';
-import { Platform, StyleSheet } from 'react-native';
+import { Audio } from 'expo-av';
+import { CameraView, useCameraPermissions } from 'expo-camera';
+import * as Notifications from 'expo-notifications';
+import * as Speech from 'expo-speech';
+import { useEffect, useRef, useState } from 'react';
+import { Button, StyleSheet, Text, View } from 'react-native';
 
-import { HelloWave } from '@/components/hello-wave';
-import ParallaxScrollView from '@/components/parallax-scroll-view';
-import { ThemedText } from '@/components/themed-text';
-import { ThemedView } from '@/components/themed-view';
-import { Link } from 'expo-router';
+Notifications.setNotificationHandler({
+  handleNotification: async () => ({
+    shouldShowAlert: true,
+    shouldPlaySound: true,
+    shouldSetBadge: false,
+  }),
+});
+
+async function scheduleBarkReminders() {
+  await Notifications.cancelAllScheduledNotificationsAsync();
+  await Notifications.scheduleNotificationAsync({
+    content: {
+      title: '🐶 BARK FOR ME',
+      body: "You haven't barked in a while... open the app. NOW.",
+      sound: true,
+    },
+    trigger: {
+      type: Notifications.SchedulableTriggerInputTypes.TIME_INTERVAL,
+      seconds: 60 * 60 * 2,
+      repeats: true,
+    },
+  });
+}
+
+const BARK_THRESHOLD = -25; // dB — louder than this = bark detected
+const COOLDOWN_MS = 3000;
+
+const GOOD_BOY_PHRASES = [
+  "Good boy!",
+  "Yes! That's my good boy!",
+  "Excellent barking! Good boy!",
+  "Woof approved! You're a good boy!",
+  "Amazing! Such a good boy!",
+];
 
 export default function HomeScreen() {
-  return (
-    <ParallaxScrollView
-      headerBackgroundColor={{ light: '#A1CEDC', dark: '#1D3D47' }}
-      headerImage={
-        <Image
-          source={require('@/assets/images/partial-react-logo.png')}
-          style={styles.reactLogo}
-        />
-      }>
-      <ThemedView style={styles.titleContainer}>
-        <ThemedText type="title">Welcome!</ThemedText>
-        <HelloWave />
-      </ThemedView>
-      <ThemedView style={styles.stepContainer}>
-        <ThemedText type="subtitle">Step 1: Try it</ThemedText>
-        <ThemedText>
-          Edit <ThemedText type="defaultSemiBold">app/(tabs)/index.tsx</ThemedText> to see changes.
-          Press{' '}
-          <ThemedText type="defaultSemiBold">
-            {Platform.select({
-              ios: 'cmd + d',
-              android: 'cmd + m',
-              web: 'F12',
-            })}
-          </ThemedText>{' '}
-          to open developer tools.
-        </ThemedText>
-      </ThemedView>
-      <ThemedView style={styles.stepContainer}>
-        <Link href="/modal">
-          <Link.Trigger>
-            <ThemedText type="subtitle">Step 2: Explore</ThemedText>
-          </Link.Trigger>
-          <Link.Preview />
-          <Link.Menu>
-            <Link.MenuAction title="Action" icon="cube" onPress={() => alert('Action pressed')} />
-            <Link.MenuAction
-              title="Share"
-              icon="square.and.arrow.up"
-              onPress={() => alert('Share pressed')}
-            />
-            <Link.Menu title="More" icon="ellipsis">
-              <Link.MenuAction
-                title="Delete"
-                icon="trash"
-                destructive
-                onPress={() => alert('Delete pressed')}
-              />
-            </Link.Menu>
-          </Link.Menu>
-        </Link>
+  const [permission, requestPermission] = useCameraPermissions();
+  const [audioPermission, setAudioPermission] = useState(false);
+  const [notifGranted, setNotifGranted] = useState(false);
+  const [barkDetected, setBarkDetected] = useState(false);
+  const [goodBoyText, setGoodBoyText] = useState('');
 
-        <ThemedText>
-          {`Tap the Explore tab to learn more about what's included in this starter app.`}
-        </ThemedText>
-      </ThemedView>
-      <ThemedView style={styles.stepContainer}>
-        <ThemedText type="subtitle">Step 3: Get a fresh start</ThemedText>
-        <ThemedText>
-          {`When you're ready, run `}
-          <ThemedText type="defaultSemiBold">npm run reset-project</ThemedText> to get a fresh{' '}
-          <ThemedText type="defaultSemiBold">app</ThemedText> directory. This will move the current{' '}
-          <ThemedText type="defaultSemiBold">app</ThemedText> to{' '}
-          <ThemedText type="defaultSemiBold">app-example</ThemedText>.
-        </ThemedText>
-      </ThemedView>
-    </ParallaxScrollView>
+  const recordingRef = useRef<Audio.Recording | null>(null);
+  const cooldownRef = useRef(false);
+  const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const handleBark = () => {
+    if (cooldownRef.current) return;
+    cooldownRef.current = true;
+
+    const phrase = GOOD_BOY_PHRASES[Math.floor(Math.random() * GOOD_BOY_PHRASES.length)];
+    setGoodBoyText(phrase);
+    setBarkDetected(true);
+
+    Speech.speak(phrase, {
+      pitch: 1.3,
+      rate: 0.85,
+    });
+
+    if (timeoutRef.current) clearTimeout(timeoutRef.current);
+    timeoutRef.current = setTimeout(() => {
+      setBarkDetected(false);
+      cooldownRef.current = false;
+    }, COOLDOWN_MS);
+  };
+
+  const startListening = async () => {
+    try {
+      await Audio.setAudioModeAsync({
+        allowsRecordingIOS: true,
+        playsInSilentModeIOS: true,
+      });
+
+      const { recording } = await Audio.Recording.createAsync(
+        { ...Audio.RecordingOptionsPresets.LOW_QUALITY, isMeteringEnabled: true },
+        (status) => {
+          if (status.isRecording && status.metering !== undefined && status.metering > BARK_THRESHOLD) {
+            handleBark();
+          }
+        },
+        100
+      );
+      recordingRef.current = recording;
+    } catch (e) {
+      console.error('Could not start listening:', e);
+    }
+  };
+
+  useEffect(() => {
+    Speech.speak('Hello! Now bark for me!', {
+      pitch: 1.2,
+      rate: 0.85,
+    });
+
+    (async () => {
+      // Notification permission
+      const { status } = await Notifications.requestPermissionsAsync();
+      if (status === 'granted') {
+        setNotifGranted(true);
+        await scheduleBarkReminders();
+      }
+
+      // Microphone permission
+      const { granted } = await Audio.requestPermissionsAsync();
+      if (granted) {
+        setAudioPermission(true);
+      }
+    })();
+
+    return () => {
+      recordingRef.current?.stopAndUnloadAsync();
+      if (timeoutRef.current) clearTimeout(timeoutRef.current);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (audioPermission) {
+      startListening();
+    }
+  }, [audioPermission]);
+
+  if (!permission) return <View />;
+
+  if (!permission.granted) {
+    return (
+      <View style={styles.permissionContainer}>
+        <Text style={styles.permissionText}>🐶 This app needs camera access to make you bark</Text>
+        <Button onPress={requestPermission} title="Allow Camera" />
+      </View>
+    );
+  }
+
+  return (
+    <View style={styles.container}>
+      <CameraView style={styles.camera} facing="front">
+        <View style={styles.overlay}>
+          {barkDetected ? (
+            <>
+              <Text style={styles.pawText}>🐾</Text>
+              <Text style={styles.goodBoyText}>{goodBoyText}</Text>
+              <Text style={styles.pawText}>🐾</Text>
+            </>
+          ) : (
+            <>
+              <Text style={styles.barkTitle}>🐶 BARK FOR ME 🐶</Text>
+              <Text style={styles.barkCommand}>NOW BARK.</Text>
+              <Text style={styles.barkSub}>I'm not joking. Bark.</Text>
+            </>
+          )}
+          {notifGranted && (
+            <Text style={styles.notifBadge}>🔔 Reminders are on</Text>
+          )}
+        </View>
+      </CameraView>
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
-  titleContainer: {
-    flexDirection: 'row',
+  container: { flex: 1 },
+  camera: { flex: 1 },
+  overlay: {
+    flex: 1,
+    justifyContent: 'center',
     alignItems: 'center',
-    gap: 8,
+    backgroundColor: 'rgba(0,0,0,0.4)',
+    gap: 16,
   },
-  stepContainer: {
-    gap: 8,
-    marginBottom: 8,
+  barkTitle: {
+    fontSize: 32,
+    fontWeight: 'bold',
+    color: 'white',
+    textAlign: 'center',
   },
-  reactLogo: {
-    height: 178,
-    width: 290,
-    bottom: 0,
-    left: 0,
+  barkCommand: {
+    fontSize: 80,
+    fontWeight: 'bold',
+    color: '#FFD700',
+    textAlign: 'center',
+  },
+  barkSub: {
+    fontSize: 22,
+    color: 'white',
+    textAlign: 'center',
+    fontStyle: 'italic',
+  },
+  goodBoyText: {
+    fontSize: 48,
+    fontWeight: 'bold',
+    color: '#FFD700',
+    textAlign: 'center',
+  },
+  pawText: {
+    fontSize: 60,
+  },
+  notifBadge: {
     position: 'absolute',
+    bottom: 40,
+    fontSize: 14,
+    color: 'rgba(255,255,255,0.7)',
+  },
+  permissionContainer: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 30,
+    gap: 20,
+  },
+  permissionText: {
+    fontSize: 18,
+    textAlign: 'center',
   },
 });
